@@ -144,6 +144,9 @@ pub struct TerminalState {
     pub agent_name: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
     managed_agent: Option<ManagedAgent>,
+    coordination_instance_id: String,
+    coordination_instance_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    coordination_owner: Option<AgentNameOwner>,
     codex_prompt_ready: bool,
     managed_agent_launch_session: Option<crate::agent_resume::PersistedAgentSession>,
     hook_report_sequences: HashMap<String, u64>,
@@ -184,6 +187,11 @@ impl TerminalState {
             agent_name: None,
             agent_name_owner: None,
             managed_agent: None,
+            coordination_instance_id: crate::coordination::new_id(),
+            coordination_instance_alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                true,
+            )),
+            coordination_owner: None,
             codex_prompt_ready: false,
             managed_agent_launch_session: None,
             hook_report_sequences: HashMap::new(),
@@ -381,6 +389,9 @@ impl TerminalState {
                     )
                     && authority.reported_at > now
             });
+        if process_exited && !newer_custom_authority {
+            self.renew_coordination_instance();
+        }
         let agent_released = process_exited
             && !newer_custom_authority
             && (previous_agent_label.is_some() || self.agent_name.is_some());
@@ -2134,6 +2145,25 @@ impl TerminalState {
         });
     }
 
+    pub(crate) fn coordination_instance_id(&self) -> &str {
+        &self.coordination_instance_id
+    }
+
+    pub(crate) fn coordination_instance_alive(
+        &self,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.coordination_instance_alive.clone()
+    }
+
+    fn renew_coordination_instance(&mut self) {
+        self.coordination_instance_alive
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.coordination_instance_alive =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.coordination_instance_id = crate::coordination::new_id();
+        self.coordination_owner = None;
+    }
+
     pub fn begin_managed_agent(
         &mut self,
         name: String,
@@ -2142,6 +2172,7 @@ impl TerminalState {
         settle_delay: Duration,
         timeout: Duration,
     ) {
+        self.renew_coordination_instance();
         self.codex_prompt_ready = false;
         self.set_agent_name(name);
         self.agent_process_acquisition_pending = true;
@@ -2298,6 +2329,7 @@ impl TerminalState {
     }
 
     pub fn restore_managed_agent(&mut self, name: String, kind: Agent) {
+        self.renew_coordination_instance();
         self.set_agent_name(name);
         self.agent_name_owner = Some(AgentNameOwner {
             agent_label: crate::detect::agent_label(kind).to_string(),
@@ -2325,6 +2357,7 @@ impl TerminalState {
     }
 
     pub fn clear_agent_runtime_identity_after_respawn(&mut self) {
+        self.renew_coordination_instance();
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
@@ -2420,6 +2453,34 @@ impl TerminalState {
         };
         let agent_label = self.effective_agent_label().map(str::to_string);
         let known_agent = self.effective_known_agent();
+        let mut owner = agent_label.as_ref().map(|label| AgentNameOwner {
+            agent_label: label.clone(),
+            session_ref: self
+                .current_session_identity_for_persistence()
+                .map(|(_, _, kind, value)| crate::agent_resume::AgentSessionRef { kind, value }),
+        });
+        // A temporary missing native report must not erase the last known owner, otherwise
+        // resuming a different native session afterward would reuse the old occupancy.
+        if let (Some(before), Some(after)) = (&self.coordination_owner, &mut owner) {
+            if before.agent_label == after.agent_label && after.session_ref.is_none() {
+                after.session_ref = before.session_ref.clone();
+            }
+        }
+        if self.coordination_owner.as_ref().is_some_and(|before| {
+            owner.as_ref().is_none_or(|after| {
+                before.agent_label != after.agent_label
+                    || before
+                        .session_ref
+                        .as_ref()
+                        .zip(after.session_ref.as_ref())
+                        .is_some_and(|(a, b)| a != b)
+            })
+        }) {
+            self.renew_coordination_instance();
+        }
+        if owner.is_some() {
+            self.coordination_owner = owner;
+        }
 
         let presentation = self.effective_presentation_for_state_at(state, now);
         self.clear_expiry_pending_for_hidden_metadata();
@@ -2442,6 +2503,13 @@ impl TerminalState {
             state,
             presentation,
         })
+    }
+}
+
+impl Drop for TerminalState {
+    fn drop(&mut self) {
+        self.coordination_instance_alive
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -2899,16 +2967,25 @@ mod tests {
             let mut terminal = test_terminal();
             let old_session = test_session_path(&format!("pi-{reason}-old.jsonl"));
             let new_session = test_session_path(&format!("pi-{reason}-new.jsonl"));
-            terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-            terminal.set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
-                "pi".into(),
-                AgentState::Idle,
-                None,
-                crate::agent_resume::AgentSessionRef::path(old_session),
-                Some(10),
+            anchor_full_lifecycle_session(
+                &mut terminal,
+                Agent::Pi,
+                "herdr:pi",
+                "pi",
+                crate::agent_resume::AgentSessionRef::path(old_session.clone()).unwrap(),
             );
+            assert!(terminal
+                .set_hook_authority_with_session_ref(
+                    "herdr:pi".into(),
+                    "pi".into(),
+                    AgentState::Idle,
+                    None,
+                    crate::agent_resume::AgentSessionRef::path(old_session),
+                    Some(10),
+                )
+                .is_some());
 
+            let previous_coordination_instance = terminal.coordination_instance_id().to_owned();
             let session_report = terminal.set_agent_session_ref_for_session_start(
                 "herdr:pi".into(),
                 "pi".into(),
@@ -2920,6 +2997,11 @@ mod tests {
             assert!(
                 session_report.is_some(),
                 "{reason} should replace the previous Pi session"
+            );
+            assert_ne!(
+                terminal.coordination_instance_id(),
+                previous_coordination_instance,
+                "native {reason} must get a new graph occupancy"
             );
             assert!(terminal.hook_authority.is_none());
 

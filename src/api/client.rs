@@ -249,6 +249,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn coordination_forward_wait_keeps_the_native_operation_deadline() {
+        #[cfg(unix)]
+        use interprocess::local_socket::traits::Listener as _;
+        let path = crate::platform::remote_bridge_endpoint_path(
+            &format!(
+                "herdr-coordination-wait-{}.sock",
+                crate::coordination::new_id()
+            ),
+            &format!("hcwait-{}.sock", std::process::id()),
+        );
+        let listener = crate::ipc::bind_private_local_listener(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "agent.coordination.forward");
+            assert_eq!(
+                request["params"]["operation"]["params"]["wait"]["timeout_ms"],
+                120_000
+            );
+            // Operation reads have no metadata-probe deadline. Exceed both the 10 s
+            // capability and 15 s SSH diagnostic budgets before returning the result.
+            std::thread::sleep(Duration::from_secs(16));
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(b"{\"id\":\"wait\",\"result\":{\"type\":\"ok\"}}\n")
+                .unwrap();
+        });
+        let client = ApiClient::for_target(ConnectionTarget::SocketPath(path.clone()));
+        let caller = crate::api::schema::AgentCoordinationEndpoint {
+            server_id: "origin".into(),
+            boot_id: "boot".into(),
+            terminal_id: "terminal".into(),
+            agent_instance_id: "instance".into(),
+            agent: "codex".into(),
+            pane_id: "w1:p1".into(),
+            name: None,
+        };
+        let response = client
+            .request_value(&Request {
+                id: "wait".into(),
+                method: Method::AgentCoordinationForward(
+                    crate::api::schema::AgentCoordinationForwardParams {
+                        caller,
+                        ssh_agent: None,
+                        destination:
+                            crate::api::schema::AgentCoordinationDestination::LocalSession {
+                                session: "worker".into(),
+                            },
+                        operation: crate::api::schema::AgentCoordinationOperation::Prompt(
+                            crate::api::schema::AgentPromptParams {
+                                target: "worker".into(),
+                                text: "run".into(),
+                                wait: Some(crate::api::schema::AgentPromptWaitOptions {
+                                    until: Vec::new(),
+                                    timeout_ms: Some(120_000),
+                                    submission_deadline: None,
+                                }),
+                            },
+                        ),
+                    },
+                ),
+            })
+            .unwrap();
+        assert_eq!(response["result"]["type"], "ok");
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn local_session_target_resolves_named_session_socket() {
         let client = ApiClient::for_target(ConnectionTarget::LocalSession(Some("work".into())));
         assert!(client.socket_path().ends_with("sessions/work/herdr.sock"));

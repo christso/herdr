@@ -814,10 +814,32 @@ fn authentication_command_with_config(
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) enum SshAgentEnvironment {
+    #[default]
+    Inherit,
+    Disabled,
+    Socket(PathBuf),
+}
+impl SshAgentEnvironment {
+    fn apply(&self, command: &mut Command) {
+        match self {
+            Self::Inherit => {}
+            Self::Disabled => {
+                command.env_remove("SSH_AUTH_SOCK");
+            }
+            Self::Socket(path) => {
+                command.env("SSH_AUTH_SOCK", path);
+            }
+        }
+    }
+}
+
 pub(super) struct RemoteSsh {
     target: String,
     session_name: String,
     managed_config: Option<ManagedSshConfig>,
+    agent_socket: SshAgentEnvironment,
     noninteractive: bool,
     pub(super) cancelled: Arc<AtomicBool>,
 }
@@ -838,6 +860,7 @@ impl RemoteSsh {
             target,
             session_name,
             managed_config,
+            agent_socket: SshAgentEnvironment::Inherit,
             noninteractive: false,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
@@ -852,6 +875,13 @@ impl RemoteSsh {
         let mut ssh = Self::new(target, manage, crate::session::DEFAULT_SESSION_NAME.into());
         ssh.noninteractive = true;
         ssh
+    }
+
+    pub(super) fn set_agent_socket(&mut self, socket: SshAgentEnvironment) {
+        self.agent_socket = socket;
+    }
+    pub(super) fn agent_socket(&self) -> &SshAgentEnvironment {
+        &self.agent_socket
     }
 
     fn target(&self) -> &str {
@@ -973,6 +1003,7 @@ impl RemoteSsh {
     #[cfg(unix)]
     fn shared_control_command(&self, options: &ManagedSshOptions, control: &Path) -> Command {
         let mut command = Command::new("ssh");
+        self.agent_socket.apply(&mut command);
         command
             .arg("-C")
             .arg("-F")
@@ -1020,12 +1051,14 @@ impl RemoteSsh {
     fn base_command(&self) -> Command {
         let mut command = Command::new("ssh");
         apply_managed_ssh_options(&mut command, self.options());
+        self.agent_socket.apply(&mut command);
         command
     }
 
     fn scp_command(&self) -> Command {
         let mut command = Command::new("scp");
         apply_managed_scp_options(&mut command, self.options());
+        self.agent_socket.apply(&mut command);
         command
     }
 
@@ -3024,6 +3057,7 @@ impl SshStdioBridge {
             ssh_options,
             noninteractive,
             should_stop,
+            SshAgentEnvironment::Inherit,
         )
     }
 
@@ -3034,6 +3068,7 @@ impl SshStdioBridge {
         ssh_options: Option<&ManagedSshOptions>,
         noninteractive: bool,
         should_stop: Arc<AtomicBool>,
+        agent_socket: SshAgentEnvironment,
     ) -> io::Result<Self> {
         crate::ipc::prepare_socket_path(&local_socket, |path| {
             format!("remote bridge is already listening at {}", path.display())
@@ -3065,6 +3100,7 @@ impl SshStdioBridge {
                             thread_ssh_options.as_ref(),
                             noninteractive,
                             &thread_stop,
+                            &agent_socket,
                         ) {
                             let _ =
                                 failure_tx.try_send(io::Error::new(err.kind(), err.to_string()));
@@ -3263,8 +3299,10 @@ fn bridge_connection(
     ssh_options: Option<&ManagedSshOptions>,
     noninteractive: bool,
     bridge_stop: &Arc<AtomicBool>,
+    agent_socket: &SshAgentEnvironment,
 ) -> io::Result<()> {
     let mut command = Command::new("ssh");
+    agent_socket.apply(&mut command);
     apply_managed_ssh_options(&mut command, ssh_options);
     if noninteractive {
         apply_noninteractive_ssh_options(&mut command);
@@ -3697,6 +3735,7 @@ mod tests {
                     _directory: Arc::new(ManagedSshConfigDirectory(directory)),
                 },
             }),
+            agent_socket: SshAgentEnvironment::Inherit,
             noninteractive: true,
             cancelled: Arc::new(AtomicBool::new(false)),
         };
@@ -4303,6 +4342,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn coordination_forwarding_scopes_the_registered_agent_to_its_ssh_commands() {
+        let fresh = || RemoteSsh {
+            target: "example.invalid".into(),
+            session_name: "default".into(),
+            managed_config: None,
+            agent_socket: SshAgentEnvironment::Inherit,
+            noninteractive: true,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let mut ssh = fresh();
+        let path = PathBuf::from("/owned-test/registered-agent.sock");
+        ssh.set_agent_socket(SshAgentEnvironment::Socket(path.clone()));
+        for command in [ssh.base_command(), ssh.scp_command()] {
+            assert!(command
+                .get_envs()
+                .any(|(name, value)| name == "SSH_AUTH_SOCK" && value == Some(path.as_os_str())));
+        }
+        let native = fresh().base_command();
+        assert!(!native.get_envs().any(|(name, _)| name == "SSH_AUTH_SOCK"));
+        ssh.set_agent_socket(SshAgentEnvironment::Disabled);
+        for command in [ssh.base_command(), ssh.scp_command()] {
+            assert!(command
+                .get_envs()
+                .any(|(name, value)| name == "SSH_AUTH_SOCK" && value.is_none()));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn remote_ssh_command_uses_managed_config_when_present() {
@@ -4313,6 +4380,7 @@ mod tests {
             target: "example".to_string(),
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
             managed_config: Some(managed_config),
+            agent_socket: SshAgentEnvironment::Inherit,
             noninteractive: false,
             cancelled: Arc::new(AtomicBool::new(false)),
         };
@@ -4385,6 +4453,7 @@ mod tests {
             target: "example".to_string(),
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
             managed_config: Some(managed_config),
+            agent_socket: SshAgentEnvironment::Inherit,
             noninteractive: false,
             cancelled: Arc::new(AtomicBool::new(false)),
         };
@@ -4465,6 +4534,7 @@ mod tests {
             target: "herdr-probe.invalid".into(),
             session_name: "probe-options".into(),
             managed_config: Some(managed_config),
+            agent_socket: SshAgentEnvironment::Inherit,
             noninteractive: false,
             cancelled: Arc::new(AtomicBool::new(false)),
         };
@@ -4606,6 +4676,7 @@ mod tests {
             target: "example".to_string(),
             session_name: crate::session::DEFAULT_SESSION_NAME.into(),
             managed_config: None,
+            agent_socket: SshAgentEnvironment::Inherit,
             noninteractive: false,
             cancelled: Arc::new(AtomicBool::new(false)),
         };

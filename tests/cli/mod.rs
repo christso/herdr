@@ -3,6 +3,7 @@ mod agent_transport;
 mod agent_wait;
 mod agents;
 mod contracts;
+mod coordination;
 mod harness;
 mod hooks;
 mod panes;

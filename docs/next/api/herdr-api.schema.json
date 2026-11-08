@@ -1228,6 +1228,257 @@
     },
     "request": {
       "$defs": {
+        "AgentCoordinationDestination": {
+          "oneOf": [
+            {
+              "properties": {
+                "machine": {
+                  "type": "string"
+                },
+                "profile_fingerprint": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "saved_machine",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "machine",
+                "profile_fingerprint"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "session": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "local_session",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "session"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentCoordinationEndpoint": {
+          "description": "One occupancy of a terminal. Pane and display names are labels, never identity.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "agent_instance_id": {
+              "type": "string"
+            },
+            "boot_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "server_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_id",
+            "boot_id",
+            "terminal_id",
+            "agent_instance_id",
+            "agent",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "AgentCoordinationExecuteParams": {
+          "properties": {
+            "operation": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationOperation"
+            },
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "AgentCoordinationForwardParams": {
+          "properties": {
+            "caller": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationEndpoint"
+            },
+            "destination": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationDestination"
+            },
+            "operation": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationOperation"
+            },
+            "ssh_agent": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentCoordinationSshAgent"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Transient operation-scoped agent selection; never part of durable receipts."
+            }
+          },
+          "required": [
+            "caller",
+            "destination",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "AgentCoordinationListParams": {
+          "properties": {
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "AgentCoordinationOperation": {
+          "oneOf": [
+            {
+              "properties": {
+                "params": {
+                  "$ref": "#/schemas/request/$defs/AgentStartParams"
+                },
+                "type": {
+                  "const": "start",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "params"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "params": {
+                  "$ref": "#/schemas/request/$defs/AgentPromptParams"
+                },
+                "type": {
+                  "const": "prompt",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "params"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentCoordinationPromptParams": {
+          "properties": {
+            "caller": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationEndpoint"
+            },
+            "operation": {
+              "$ref": "#/schemas/request/$defs/AgentPromptParams"
+            }
+          },
+          "required": [
+            "caller",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "AgentCoordinationResultParams": {
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id"
+          ],
+          "type": "object"
+        },
+        "AgentCoordinationSshAgent": {
+          "oneOf": [
+            {
+              "properties": {
+                "socket_path": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "registered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "socket_path"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "disabled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "AgentCoordinationStartParams": {
+          "properties": {
+            "caller": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationEndpoint"
+            },
+            "operation": {
+              "$ref": "#/schemas/request/$defs/AgentStartParams"
+            }
+          },
+          "required": [
+            "caller",
+            "operation"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -6312,6 +6563,102 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.coordination.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.coordination.start",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.coordination.prompt",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationPromptParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.coordination.execute",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationExecuteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.coordination.forward",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationForwardParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.coordination.result",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCoordinationResultParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -6540,6 +6887,102 @@
     },
     "success_response": {
       "$defs": {
+        "AgentCoordinationEndpoint": {
+          "description": "One occupancy of a terminal. Pane and display names are labels, never identity.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "agent_instance_id": {
+              "type": "string"
+            },
+            "boot_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "server_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_id",
+            "boot_id",
+            "terminal_id",
+            "agent_instance_id",
+            "agent",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "AgentCoordinationKind": {
+          "enum": [
+            "delegation",
+            "communication"
+          ],
+          "type": "string"
+        },
+        "AgentCoordinationOutcome": {
+          "description": "A successful operation receipt returned to its originating daemon, without a claimed caller.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentCoordinationKind"
+            },
+            "occurred_at": {
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/schemas/success_response/$defs/AgentCoordinationEndpoint"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "target",
+            "occurred_at"
+          ],
+          "type": "object"
+        },
+        "AgentCoordinationReceipt": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentCoordinationKind"
+            },
+            "occurred_at": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/AgentCoordinationEndpoint"
+            },
+            "target": {
+              "$ref": "#/schemas/success_response/$defs/AgentCoordinationEndpoint"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "source",
+            "target",
+            "occurred_at"
+          ],
+          "type": "object"
+        },
         "AgentInfo": {
           "properties": {
             "agent": {
@@ -10413,6 +10856,74 @@
               },
               "required": [
                 "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "outcome": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentCoordinationOutcome"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "agent_coordination_result",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agents": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentCoordinationEndpoint"
+                  },
+                  "type": "array"
+                },
+                "boot_id": {
+                  "type": "string"
+                },
+                "cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "receipts": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentCoordinationReceipt"
+                  },
+                  "type": "array"
+                },
+                "server_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_coordination",
+                  "type": "string"
+                },
+                "version": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "type",
+                "version",
+                "server_id",
+                "boot_id",
+                "agents",
+                "receipts"
               ],
               "type": "object"
             }

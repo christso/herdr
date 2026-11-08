@@ -147,6 +147,8 @@ pub struct App {
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
+    pub(crate) coordination: Arc<std::sync::Mutex<crate::coordination::Journal>>,
+    pub(crate) pending_coordination_launches: HashMap<String, api::coordination::PendingLaunch>,
     pane_exit_checkpoint_pending: bool,
     server_hangup_probe: fn() -> bool,
     pub(crate) detached_process_children: Vec<std::process::Child>,
@@ -663,6 +665,12 @@ impl App {
             session_save_deadline: None,
             session_save_thread: None,
             session_writer,
+            coordination: Arc::new(std::sync::Mutex::new(crate::coordination::Journal::open(
+                policy
+                    .persist_session
+                    .then(|| crate::session::data_dir().join("agent-coordination.json")),
+            ))),
+            pending_coordination_launches: HashMap::new(),
             pane_exit_checkpoint_pending: false,
             #[cfg(not(test))]
             server_hangup_probe: crate::platform::server_hangup_is_recent,

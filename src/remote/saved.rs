@@ -1,12 +1,12 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
 
-use super::attach::{find_installed_remote_herdr, RemoteSsh, SshStdioBridge};
+use super::attach::{find_installed_remote_herdr, RemoteSsh, SshAgentEnvironment, SshStdioBridge};
 
 pub(crate) struct SavedSshBridge {
     _bridge: SshStdioBridge,
@@ -73,7 +73,37 @@ impl SavedSshApiBridge {
         use_cached_metadata: bool,
         allow_retry: bool,
     ) -> io::Result<Self> {
-        let ssh = validated_saved_ssh(profile_id, target, session)?;
+        Self::start_with_options(
+            profile_id,
+            target,
+            session,
+            use_cached_metadata,
+            allow_retry,
+            SshAgentEnvironment::Inherit,
+            false,
+        )
+    }
+
+    pub(crate) fn start_coordination(
+        profile_id: &str,
+        target: &str,
+        session: &str,
+        agent_socket: SshAgentEnvironment,
+    ) -> io::Result<Self> {
+        Self::start_with_options(profile_id, target, session, true, false, agent_socket, true)
+    }
+
+    fn start_with_options(
+        profile_id: &str,
+        target: &str,
+        session: &str,
+        use_cached_metadata: bool,
+        allow_retry: bool,
+        agent_socket: SshAgentEnvironment,
+        unique_endpoint: bool,
+    ) -> io::Result<Self> {
+        let mut ssh = validated_saved_ssh(profile_id, target, session)?;
+        ssh.set_agent_socket(agent_socket);
         let mut can_retry = allow_retry;
         let metadata_cache =
             crate::client::endpoint::SshMetadataCache::new(profile_id, target, session)?;
@@ -95,14 +125,20 @@ impl SavedSshApiBridge {
             }
         };
         let command = super::attach::cached_remote_api_command(&metadata, session);
-        let path = crate::platform::remote_bridge_endpoint_path(
-            &format!("herdr-api-ssh-{}-{profile_id}.sock", std::process::id()),
-            &format!(
-                "herdr-api-{}-{}.sock",
-                std::process::id(),
-                &profile_id[..16]
-            ),
-        );
+        // Legacy CLI recovery retains its original ApiClient and replaces this
+        // endpoint in place. Concurrent daemon operations require owned endpoints.
+        let path = if unique_endpoint {
+            saved_api_bridge_path(profile_id)
+        } else {
+            crate::platform::remote_bridge_endpoint_path(
+                &format!("herdr-api-ssh-{}-{profile_id}.sock", std::process::id()),
+                &format!(
+                    "herdr-api-{}-{}.sock",
+                    std::process::id(),
+                    &profile_id[..16]
+                ),
+            )
+        };
         let bridge = SshStdioBridge::start_command(
             target.to_owned(),
             command,
@@ -110,6 +146,7 @@ impl SavedSshApiBridge {
             ssh.options(),
             true,
             Arc::new(AtomicBool::new(false)),
+            ssh.agent_socket().clone(),
         )?;
         Ok(Self {
             path,
@@ -179,6 +216,24 @@ pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+static NEXT_API_BRIDGE: AtomicU64 = AtomicU64::new(1);
+
+fn saved_api_bridge_path(profile_id: &str) -> PathBuf {
+    let nonce = NEXT_API_BRIDGE.fetch_add(1, Ordering::Relaxed);
+    crate::platform::remote_bridge_endpoint_path(
+        &format!(
+            "herdr-api-ssh-{}-{}-{nonce:x}.sock",
+            std::process::id(),
+            &profile_id[..16]
+        ),
+        &format!(
+            "herdr-api-{}-{}-{nonce:x}.sock",
+            std::process::id(),
+            &profile_id[..16]
+        ),
+    )
+}
+
 fn saved_bridge_path(profile_id: &str) -> PathBuf {
     let pid = std::process::id();
     let readable = format!("herdr-ssh-{pid}-{profile_id}.sock");
@@ -219,6 +274,18 @@ mod tests {
         assert_ne!(first, second);
         assert!(!first.to_string_lossy().contains("example.com"));
         assert!(!first.to_string_lossy().contains("default"));
+    }
+
+    #[test]
+    fn concurrent_api_bridges_for_one_profile_use_distinct_private_endpoints() {
+        let profile = "0123456789abcdef0123456789abcdef";
+        let paths: std::collections::HashSet<_> =
+            (0..32).map(|_| saved_api_bridge_path(profile)).collect();
+        assert_eq!(paths.len(), 32);
+        for path in paths {
+            assert!(path.to_string_lossy().len() < 108);
+            assert!(!path.to_string_lossy().contains("example.com"));
+        }
     }
 
     #[test]

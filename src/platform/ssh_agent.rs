@@ -21,10 +21,16 @@ type Fingerprint = (u64, u64, u32, i64, i64);
 #[derive(Clone)]
 pub(crate) struct SshAgentRegistry(Arc<Mutex<State>>);
 
+struct AgentRegistration {
+    id: u64,
+    path: PathBuf,
+    client: bool,
+}
+
 struct State {
     path: PathBuf,
     fallback: Option<PathBuf>,
-    agents: Vec<(u64, PathBuf)>,
+    agents: Vec<AgentRegistration>,
     next_id: u64,
     identity: Option<(u64, u64)>,
     observed: Vec<Option<Fingerprint>>,
@@ -120,6 +126,19 @@ impl SshAgentRegistry {
     }
 
     pub(crate) fn register(&self, path: PathBuf) -> io::Result<SshAgentLease> {
+        self.register_inner(path, false)
+    }
+
+    /// Keep this request's already-registered socket alive without changing selection policy.
+    pub(crate) fn lease_registered(&self, path: PathBuf) -> io::Result<SshAgentLease> {
+        self.register_inner(path, true)
+    }
+
+    fn register_inner(
+        &self,
+        path: PathBuf,
+        require_registration: bool,
+    ) -> io::Result<SshAgentLease> {
         let mut state = self
             .0
             .lock()
@@ -130,12 +149,27 @@ impl SshAgentRegistry {
                 "SSH agent must be an absolute, user-owned socket",
             ));
         }
+        if require_registration
+            && !state
+                .agents
+                .iter()
+                .any(|registered| registered.client && registered.path == path)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SSH agent has no active client registration",
+            ));
+        }
         // Canonicalizing /var to /private/var can exceed macOS's Unix socket path limit.
         let id = state.next_id;
         state.next_id += 1;
-        state.agents.push((id, path));
+        state.agents.push(AgentRegistration {
+            id,
+            path,
+            client: !require_registration,
+        });
         if let Err(error) = state.publish(Instant::now()) {
-            state.agents.retain(|(candidate, _)| *candidate != id);
+            state.agents.retain(|candidate| candidate.id != id);
             return Err(error);
         }
         Ok(SshAgentLease {
@@ -161,7 +195,12 @@ impl State {
     fn observe(&self) -> Vec<Option<Fingerprint>> {
         self.fallback
             .iter()
-            .chain(self.agents.iter().map(|(_, path)| path))
+            .chain(
+                self.agents
+                    .iter()
+                    .filter(|registered| registered.client)
+                    .map(|registered| &registered.path),
+            )
             .map(|path| fingerprint(path))
             .collect()
     }
@@ -179,7 +218,8 @@ impl State {
             .or_else(|| {
                 self.agents
                     .iter()
-                    .map(|(_, path)| path.as_path())
+                    .filter(|registered| registered.client)
+                    .map(|registered| registered.path.as_path())
                     .find(|path| live_socket(path))
             })
             .unwrap_or(&unavailable)
@@ -252,7 +292,7 @@ impl SshAgentLease {
 impl Drop for SshAgentLease {
     fn drop(&mut self) {
         if let Ok(mut state) = self.registry.0.lock() {
-            state.agents.retain(|(id, _)| *id != self.id);
+            state.agents.retain(|registered| registered.id != self.id);
             if let Err(error) = state.publish(Instant::now()) {
                 tracing::warn!(%error, "could not refresh SSH agent after attachment ended");
             }
@@ -271,6 +311,70 @@ pub(crate) fn apply_pane_env(command: &mut portable_pty::CommandBuilder) {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn coordination_agent_lease_requires_a_live_client_registration_and_preserves_global_selection()
+    {
+        let directory =
+            std::env::temp_dir().join(format!("hscoped-{}", crate::coordination::new_id()));
+        fs::create_dir(&directory).unwrap();
+        let a = directory.join("a");
+        let b = directory.join("b");
+        let stable = directory.join("agent");
+        let _listener_a = UnixListener::bind(&a).unwrap();
+        let _listener_b = UnixListener::bind(&b).unwrap();
+        let registry = SshAgentRegistry::new(stable.clone(), Some(a.clone())).unwrap();
+        assert!(registry.lease_registered(b.clone()).is_err());
+        let client = registry.register(b.clone()).unwrap();
+        let operation = registry.lease_registered(b.clone()).unwrap();
+        assert_eq!(fs::read_link(&stable).unwrap(), a);
+        drop(client);
+        assert!(
+            registry.lease_registered(b.clone()).is_err(),
+            "an operation lease is not a caller registration"
+        );
+        operation.refresh().unwrap();
+        drop(operation);
+        drop(registry);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn coordination_operation_lease_never_publishes_a_departed_clients_agent() {
+        let directory =
+            std::env::temp_dir().join(format!("hopagent-{}", crate::coordination::new_id()));
+        fs::create_dir(&directory).unwrap();
+        let b = directory.join("b");
+        let stable = directory.join("agent");
+        let _listener_b = UnixListener::bind(&b).unwrap();
+        let registry = SshAgentRegistry::new(stable.clone(), None).unwrap();
+        let client = registry.register(b.clone()).unwrap();
+        let operation = registry.lease_registered(b.clone()).unwrap();
+        assert_eq!(fs::read_link(&stable).unwrap(), b);
+        drop(client);
+        assert_eq!(
+            fs::read_link(&stable).unwrap(),
+            stable.with_extension("unavailable")
+        );
+        assert!(registry.0.lock().unwrap().observe().is_empty());
+        assert!(registry.lease_registered(b.clone()).is_err());
+        operation.refresh().unwrap();
+        // The already-authorized operation still owns its exact live socket B;
+        // the shared proxy and future registrations cannot borrow that authority.
+        assert!(live_socket(&b));
+        assert!(registry
+            .0
+            .lock()
+            .unwrap()
+            .agents
+            .iter()
+            .any(|registered| registered.id == operation.id
+                && registered.path == b
+                && !registered.client));
+        drop(operation);
+        drop(registry);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn server_without_an_agent_leaves_local_pane_agent_setup_alone() {

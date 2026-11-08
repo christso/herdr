@@ -8,7 +8,7 @@ use crate::api::client::{parse_response_value, ApiClientError};
 use crate::api::schema::{Method, Request, ResponseResult, ServerSshAgentRegisterParams};
 use crate::ipc::{LocalStream, LocalStreamRead, LocalStreamReadCount};
 
-pub(super) struct Registration {
+pub(crate) struct Registration {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -21,7 +21,7 @@ impl Registration {
         Self::start_at(path, crate::api::socket_path())
     }
 
-    fn start_at(path: String, socket_path: PathBuf) -> Option<Self> {
+    pub(crate) fn start_at(path: String, socket_path: PathBuf) -> Option<Self> {
         let mut stream = match connect(&path, &socket_path) {
             Ok(None) => return None,
             Ok(stream) => stream,

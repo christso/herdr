@@ -266,6 +266,7 @@ fn agent_start(params: AgentStartParams) -> std::io::Result<i32> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
     let retryable_timeout = timeout > crate::app::AGENT_START_SETTLE_DELAY
         && timeout <= crate::app::MAX_AGENT_START_TIMEOUT;
+    let caller = coordination_caller();
     let pinned_terminal_id = pane_terminal_id(&pane_id)?;
     let mut retry_deadline = None;
     let mut previous_busy_response = None;
@@ -280,16 +281,17 @@ fn agent_start(params: AgentStartParams) -> std::io::Result<i32> {
             }
         }
 
-        let response = super::send_request(&Request {
-            id: "cli:agent:start".into(),
-            method: Method::AgentStart(AgentStartParams {
+        let response = send_coordination_operation(
+            "cli:agent:start",
+            caller.clone(),
+            crate::api::schema::AgentCoordinationOperation::Start(AgentStartParams {
                 name: name.clone(),
                 kind: kind.clone(),
                 pane_id: pane_id.clone(),
                 args: agent_args.clone(),
                 timeout_ms,
             }),
-        })?;
+        )?;
         if response.get("error").is_none() {
             break response;
         }
@@ -592,11 +594,190 @@ fn agent_rename(params: AgentRenameParams) -> std::io::Result<i32> {
     })?)
 }
 
+fn coordination_caller() -> Option<crate::api::schema::AgentCoordinationEndpoint> {
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    let client = coordination_origin_client()?;
+    let current = client
+        .request_value_with_timeout(
+            &Request {
+                id: "cli:coordination:caller".into(),
+                method: Method::PaneCurrent(crate::api::schema::PaneCurrentParams {
+                    caller_pane_id: Some(pane),
+                }),
+            },
+            Duration::from_secs(1),
+        )
+        .ok()?;
+    let terminal = current["result"]["pane"]["terminal_id"].as_str()?;
+    let response = client
+        .request_value_with_timeout(
+            &Request {
+                id: "cli:coordination:capability".into(),
+                method: Method::AgentCoordinationList(Default::default()),
+            },
+            Duration::from_secs(1),
+        )
+        .ok()?;
+    response["result"]["agents"]
+        .as_array()?
+        .iter()
+        .find(|agent| agent["terminal_id"].as_str() == Some(terminal))
+        .and_then(|agent| serde_json::from_value(agent.clone()).ok())
+}
+
+fn coordination_origin_client() -> Option<crate::api::client::ApiClient> {
+    let socket = std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR)?;
+    Some(crate::api::client::ApiClient::for_target(
+        crate::api::client::ConnectionTarget::SocketPath(socket.into()),
+    ))
+}
+
+fn coordination_destination() -> Option<crate::api::schema::AgentCoordinationDestination> {
+    if let Some(machine) = super::target::coordination_machine() {
+        return Some(machine);
+    }
+    if crate::session::explicit_session_requested() {
+        let origin = coordination_origin_client()?;
+        if origin.socket_path() != crate::api::client::ApiClient::local().socket_path() {
+            return Some(
+                crate::api::schema::AgentCoordinationDestination::LocalSession {
+                    session: crate::session::active_name()
+                        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.into()),
+                },
+            );
+        }
+    }
+    None
+}
+
+fn send_coordination_operation(
+    id: &str,
+    caller: Option<crate::api::schema::AgentCoordinationEndpoint>,
+    operation: crate::api::schema::AgentCoordinationOperation,
+) -> std::io::Result<serde_json::Value> {
+    let plain = || match &operation {
+        crate::api::schema::AgentCoordinationOperation::Start(params) => {
+            Method::AgentStart(params.clone())
+        }
+        crate::api::schema::AgentCoordinationOperation::Prompt(params) => {
+            Method::AgentPrompt(params.clone())
+        }
+    };
+    if let (Some(destination), Some(caller)) = (coordination_destination(), caller.clone()) {
+        let Some(origin) = coordination_origin_client() else {
+            return super::send_request(&Request {
+                id: id.into(),
+                method: plain(),
+            });
+        };
+        let saved_machine = matches!(
+            &destination,
+            crate::api::schema::AgentCoordinationDestination::SavedMachine { .. }
+        );
+        let ssh_agent = if saved_machine {
+            match crate::platform::coordination_cli_ssh_agent(&origin.socket_path()) {
+                Ok(selection) => selection,
+                // An OS-native socket path need not be valid JSON text. Preserve native SSH.
+                Err(()) => {
+                    return super::send_request(&Request {
+                        id: id.into(),
+                        method: plain(),
+                    })
+                }
+            }
+        } else {
+            None
+        };
+        let _ssh_agent_lease = if matches!(
+            &ssh_agent,
+            Some(crate::api::schema::AgentCoordinationSshAgent::Registered { .. })
+        ) {
+            crate::platform::register_cli_ssh_agent(&origin.socket_path())
+        } else {
+            None
+        };
+        let response = origin
+            .request_value(&Request {
+                id: id.into(),
+                method: Method::AgentCoordinationForward(
+                    crate::api::schema::AgentCoordinationForwardParams {
+                        caller,
+                        destination,
+                        operation: operation.clone(),
+                        ssh_agent,
+                    },
+                ),
+            })
+            .map_err(std::io::Error::other)?;
+        if !matches!(
+            response["error"]["code"].as_str(),
+            Some(
+                "coordination_unsupported"
+                    | "coordination_forward_not_started"
+                    | "coordination_caller_changed"
+                    | "coordination_machine_changed"
+            )
+        ) {
+            return Ok(response);
+        }
+        // These refusals occur before mutation; preserve native command behavior without guessing a relationship.
+        return super::send_request(&Request {
+            id: id.into(),
+            method: plain(),
+        });
+    }
+    let method = match operation.clone() {
+        crate::api::schema::AgentCoordinationOperation::Start(params) => {
+            coordination_start_method(caller, params)
+        }
+        crate::api::schema::AgentCoordinationOperation::Prompt(params) => {
+            coordination_prompt_method(caller, params)
+        }
+    };
+    super::send_request(&Request {
+        id: id.into(),
+        method,
+    })
+}
+
+fn coordination_start_method(
+    caller: Option<crate::api::schema::AgentCoordinationEndpoint>,
+    operation: AgentStartParams,
+) -> Method {
+    match caller {
+        Some(caller) => {
+            Method::AgentCoordinationStart(crate::api::schema::AgentCoordinationStartParams {
+                caller,
+                operation,
+            })
+        }
+        None => Method::AgentStart(operation),
+    }
+}
+
+fn coordination_prompt_method(
+    caller: Option<crate::api::schema::AgentCoordinationEndpoint>,
+    operation: AgentPromptParams,
+) -> Method {
+    match caller {
+        Some(caller) => {
+            Method::AgentCoordinationPrompt(crate::api::schema::AgentCoordinationPromptParams {
+                caller,
+                operation,
+            })
+        }
+        None => Method::AgentPrompt(operation),
+    }
+}
+
 fn agent_prompt(params: AgentPromptParams) -> std::io::Result<i32> {
-    let response = super::send_request(&Request {
-        id: "cli:agent:prompt".into(),
-        method: Method::AgentPrompt(params),
-    })?;
+    let response = send_coordination_operation(
+        "cli:agent:prompt",
+        coordination_caller(),
+        crate::api::schema::AgentCoordinationOperation::Prompt(params),
+    )?;
     super::print_response(&response)
 }
 

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod commands;
 pub mod common;
+pub mod coordination;
 pub mod events;
 pub mod integrations;
 pub(crate) mod operations;
@@ -18,6 +19,7 @@ pub mod worktrees;
 pub use agents::*;
 pub use commands::*;
 pub use common::*;
+pub use coordination::*;
 pub use events::*;
 pub use integrations::*;
 pub use panes::*;
@@ -145,6 +147,12 @@ operations::define_operations! {
     PluginPaneOpen(PluginPaneOpenParams) => "plugin.pane.open", true, false;
     PluginPaneFocus(PluginPaneFocusParams) => "plugin.pane.focus", true, false;
     PluginPaneClose(PluginPaneCloseParams) => "plugin.pane.close", true, false;
+    AgentCoordinationList(AgentCoordinationListParams) => "agent.coordination.list", false, false;
+    AgentCoordinationStart(AgentCoordinationStartParams) => "agent.coordination.start", true, false;
+    AgentCoordinationPrompt(AgentCoordinationPromptParams) => "agent.coordination.prompt", true, false;
+    AgentCoordinationExecute(AgentCoordinationExecuteParams) => "agent.coordination.execute", true, false;
+    AgentCoordinationForward(AgentCoordinationForwardParams) => "agent.coordination.forward", true, false;
+    AgentCoordinationResult(AgentCoordinationResultParams) => "agent.coordination.result", false, false;
 }
 
 #[cfg(test)]

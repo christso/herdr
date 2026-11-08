@@ -29,6 +29,24 @@ herdr api schema --output herdr-api.schema.json
 
 普通的 `herdr api schema` 打印简短摘要。`--json` 打印供工具使用的完整 JSON Schema,`--output PATH` 将该文档写入文件。schema 覆盖原始请求、成功响应、错误响应、发出的事件和订阅事件。
 
+## 智能体协调记录（自定义分支）
+
+Ovis 使用的自定义分支增加了可选的协调记录 API。上游 0.9.5 不提供此功能，因此客户端通过 `agent.coordination.list` 探测支持情况，不依赖版本号。既有 `agent.start`、`agent.prompt` 请求格式和冻结的端点编码保持不变。
+
+从已识别智能体的窗格调用 `agent start` 或 `agent prompt` 时，分支 CLI 自动记录调用来源。启动的同一智能体就绪后才记录有向委派；PTY 确认文本和 Enter 均已写入后才记录通信，发生在后续 `--wait` 结果之前。等待超时不会删除已成功提交的记录。记录不表示对方已阅读或处理消息。失败或被阻止的提交不产生通信记录。
+
+来源由继承的原始 socket 和不可复用的智能体实例 ID 标识，不根据窗格编号、名称、原生会话提示或 PID 推断关系。移动窗格保留实例，替换智能体或恢复另一原生会话会产生新实例。已识别智能体之外的命令没有被归属的来源。无法确认来源或日志不可读时，正常的原生命令仍然执行，不伪造关系。
+
+`--machine` 由来源守护进程验证启用的已保存配置及其指纹后转发。复用既有的连接级 SSH agent 注册，不复制凭据。显式命名会话使用相同的来源记录路径。两条路径均不接受任意主机、URL 或 shell 命令。只有明确发生在提交前的拒绝可以回退到原有传输；提交后的不确定结果绝不自动重放。旧服务器保留原有命令行为，不声称支持记录。
+
+`agent.coordination.forward` 的可选 `ssh_agent` 可以选择由有效客户端注册及操作级租约保留的 `{ "type": "registered", "socket_path": "/absolute/agent.sock" }`，或 `{ "type": "disabled" }`。显式 socket 优先于守护进程的 agent；未设置或空值禁用继承的 agent。正常继承的 `.agent` 代理保留既有选择规则。无法用 JSON 表示的 socket 在任何协调提交之前使用原生传输。此选择不写入持久日志。
+
+提交后传输结果不确定时，来源守护进程最多继续观察该操作的准确结果 5 秒，绝不重放输入。稍后成功的 PTY 写入仍可产生记录，但原生命令及丢失的 `--wait` 结果保持未确认。指向自身实例的已保存配置仍可发送输入，但不产生自关联。
+
+只读 `agent.coordination.list` 接受可选 `cursor` 和 `limit`，默认每页 200 条，上限 500 条。结果类型为 `agent_coordination`，`version` 为 `1`，包含持久 `server_id`、当前 `boot_id`、当前 `agents`、历史 `receipts`，以及下一页 `cursor` 或 `null`。端点包含 `server_id`、`boot_id`、`terminal_id`、`agent_instance_id`、`agent`、历史 `pane_id` 和 `name`。记录包含操作 `id`、`kind`、`source`、`target` 和 `occurred_at`。Ovis 通过最新的所有权证据另外关联原生与逻辑会话；元数据不赋予终端控制权。
+
+守护进程在会话数据目录的私有 `agent-coordination.json` 中持久化元数据，关闭窗格或重启守护进程后仍保留历史，重启会创建新的启动命名空间。不保存提示词、参数、消息正文、工作目录路径或凭据。未知或损坏格式的原始字节保留不变。这是本地持久化，不是复制或丢失机器的恢复；请将文件纳入状态备份。
+
 ## 你能控制什么
 
 socket API 可以:
