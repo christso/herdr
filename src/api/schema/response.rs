@@ -278,6 +278,17 @@ pub enum ResponseResult {
         projection_revision: u64,
     },
     Ok {},
+    AgentCoordinationResult {
+        outcome: Option<super::AgentCoordinationOutcome>,
+    },
+    AgentCoordination {
+        version: u32,
+        server_id: String,
+        boot_id: String,
+        agents: Vec<super::AgentCoordinationEndpoint>,
+        receipts: Vec<super::AgentCoordinationReceipt>,
+        cursor: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

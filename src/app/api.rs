@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+pub(crate) mod coordination;
 mod env;
 mod integrations;
 mod layouts;
@@ -1124,7 +1125,26 @@ impl App {
                 return self.handle_agent_view_clear(request.id, params);
             }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
-            Method::AgentPrompt(_) => {
+            Method::AgentCoordinationResult(params) => {
+                return self.handle_agent_coordination_result(request.id, params)
+            }
+            Method::AgentCoordinationExecute(params) => {
+                return self.handle_agent_coordination_execute(request.id, params)
+            }
+            Method::AgentCoordinationForward(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "coordination forwarding is handled asynchronously",
+                )
+            }
+            Method::AgentCoordinationList(params) => {
+                return self.handle_agent_coordination_list(request.id, params)
+            }
+            Method::AgentCoordinationStart(params) => {
+                return self.handle_agent_coordination_start(request.id, params)
+            }
+            Method::AgentPrompt(_) | Method::AgentCoordinationPrompt(_) => {
                 return responses::encode_error(
                     request.id,
                     "invalid_request",

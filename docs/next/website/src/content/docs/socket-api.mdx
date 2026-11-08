@@ -33,6 +33,61 @@ Schema document for tools, and `--output PATH` writes that document to a file.
 The schema covers raw requests, success responses, error responses, emitted
 events, and subscription events.
 
+## Agent coordination receipts (custom fork)
+
+The custom fork used by Ovis adds optional coordination capture. Upstream 0.9.5 does not
+provide it: clients probe `agent.coordination.list` instead of relying on the version number.
+The existing `agent.start` and `agent.prompt` request shapes and frozen endpoint codecs are unchanged.
+
+The fork CLI automatically attributes `agent start` and `agent prompt` called from a recognized
+agent's pane. A successful launch creates a directed delegation receipt once that exact agent
+occupancy becomes ready. Communication is recorded after the PTY confirms both text and Enter
+were written, before any later `--wait` result. A subsequent wait timeout does not erase a
+successful submission. Receipts describe recorded operations, not whether another agent read
+or acted on a message. Failed or blocked submissions create no communication receipt.
+
+The inherited origin socket and immutable agent occupancy identify the caller. Pane numbers,
+labels, native session hints and process IDs alone establish no relationship. A moved pane
+keeps its occupancy; a replacement agent or resumed native session gets another one. A command
+from outside a recognized agent has no attributed caller. Unknown provenance or an unreadable
+journal never blocks an otherwise valid native operation and never fabricates a relationship.
+
+For `--machine`, the origin daemon resolves the same enabled saved profile and checks its
+fingerprint before forwarding. The existing connection-scoped SSH-agent registration carries
+the CLI's current agent to that operation without copying credentials. Explicit named-session
+commands use the same origin-owned receipt path with a validated local session name. Neither
+path accepts arbitrary hosts, URLs or shell commands. A refusal proven to precede submission
+can fall back to the existing native transport; an ambiguous result after submission is never
+replayed automatically. Older destination servers keep ordinary command behavior without
+claiming coordination coverage.
+
+The optional `ssh_agent` field on `agent.coordination.forward` selects either
+`{ "type": "registered", "socket_path": "/absolute/agent.sock" }`, backed by an active
+client registration and retained by an operation lease, or `{ "type": "disabled" }`.
+The CLI preserves its per-command SSH agent: an explicit socket overrides a live daemon agent,
+unset or empty disables that inherited agent, and the normal inherited `.agent` proxy keeps
+its existing selection policy. A socket that cannot be represented as JSON uses native
+transport before any coordinated submission. The selector is transient and is never journaled.
+
+After an ambiguous submitted-operation transport failure, the origin observes its exact
+outcome for up to five seconds without replaying input. A late PTY completion can still create
+a receipt; the native result remains unconfirmed, including any lost `--wait` result. A saved
+profile alias to the calling occupancy can deliver input but creates no self-relationship.
+
+The read-only JSON method accepts `{ "cursor": "0", "limit": 200 }` (both optional,
+maximum page 500). Its result has type `agent_coordination`, version `1`, persistent `server_id`,
+current `boot_id`, current `agents`, historical `receipts`, and the next `cursor` or `null`.
+Each endpoint contains `server_id`, `boot_id`, `terminal_id`, `agent_instance_id`, `agent`,
+historical `pane_id` and optional `name`. A receipt contains its operation `id`, `kind`,
+`source`, `target` and `occurred_at`. Ovis resolves native/logical associations separately from
+fresh ownership proof; these metadata IDs grant no terminal control.
+
+The daemon writes private `agent-coordination.json` in its session data directory. Metadata
+survives closed panes and daemon restarts; a restart creates a new boot namespace while
+preserving old receipts. No prompts, arguments, message contents, checkout paths or credentials
+are retained. Unknown or malformed journal formats preserve the original bytes. The file is
+local durability, not replication or recovery from a lost machine; include it in state backups.
+
 ## What you can control
 
 The socket API can:

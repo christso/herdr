@@ -266,6 +266,41 @@ fn success(output: Output) -> Value {
 #[test]
 fn machine_api_routes_structured_payload_and_remote_errors_without_local_fallback() {
     let harness = Harness::new();
+    // An inherited pane is only a hint: an older origin may not support caller
+    // attribution. Its read-only refusal must preserve the original remote call.
+    let origin = harness.local.try_clone().unwrap();
+    let origin_probe = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match origin.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "origin metadata probe did not arrive"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "pane.current");
+        assert_eq!(request["params"]["caller_pane_id"], "wrong-local-pane");
+        writeln!(
+            stream,
+            "{}",
+            json!({"id":request["id"],"error":{"code":"unknown_method","message":"unsupported"}})
+        )
+        .unwrap();
+    });
     let server = harness.serve(
         json!({"error":{"code":"test_remote_error","message":"remote rejected prompt"}}),
         harness.protocol,
@@ -279,6 +314,7 @@ fn machine_api_routes_structured_payload_and_remote_errors_without_local_fallbac
     let error: Value = serde_json::from_slice(&output.stderr)
         .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)));
     assert_eq!(error["error"]["code"], "test_remote_error");
+    origin_probe.join().unwrap();
     let request = server.join().unwrap();
     assert_eq!(request["method"], "agent.prompt");
     assert_eq!(request["params"]["text"], prompt);

@@ -6,6 +6,71 @@
 #[cfg(unix)]
 pub(crate) mod ssh_agent;
 
+/// Holds the existing connection-scoped SSH-agent registration during one CLI operation.
+pub(crate) struct CliSshAgentLease {
+    #[cfg(unix)]
+    _registration: crate::remote::ssh_agent::Registration,
+}
+
+pub(crate) fn register_cli_ssh_agent(api_path: &std::path::Path) -> Option<CliSshAgentLease> {
+    #[cfg(unix)]
+    {
+        let socket = std::env::var("SSH_AUTH_SOCK")
+            .ok()
+            .filter(|path| !path.is_empty())?;
+        crate::remote::ssh_agent::Registration::start_at(socket, api_path.to_owned()).map(
+            |registration| CliSshAgentLease {
+                _registration: registration,
+            },
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = api_path;
+        None
+    }
+}
+
+pub(crate) fn registered_ssh_agent_socket() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        let path = ssh_agent::socket_path();
+        std::fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            .then_some(path)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+pub(crate) fn coordination_cli_ssh_agent(
+    origin: &std::path::Path,
+) -> Result<Option<crate::api::schema::AgentCoordinationSshAgent>, ()> {
+    coordination_ssh_agent_selection(origin, std::env::var_os("SSH_AUTH_SOCK").as_deref())
+}
+
+fn coordination_ssh_agent_selection(
+    origin: &std::path::Path,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<Option<crate::api::schema::AgentCoordinationSshAgent>, ()> {
+    use crate::api::schema::AgentCoordinationSshAgent;
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(Some(AgentCoordinationSshAgent::Disabled));
+    };
+    let value = value.to_str().ok_or(())?;
+    let mut proxy = origin.as_os_str().to_os_string();
+    proxy.push(".agent");
+    if std::path::Path::new(value) == std::path::Path::new(&proxy) {
+        Ok(None)
+    } else {
+        Ok(Some(AgentCoordinationSshAgent::Registered {
+            socket_path: value.into(),
+        }))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // Native adapters construct only the event classifications their OS can report.
 #[allow(dead_code)]

@@ -49,6 +49,7 @@ impl App {
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
 
+        self.complete_coordination_launch(&agent);
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
 
@@ -84,8 +85,27 @@ impl App {
         request: crate::api::schema::Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> bool {
-        let crate::api::schema::Method::AgentPrompt(params) = request.method else {
-            return false;
+        if let crate::api::schema::Method::AgentCoordinationForward(params) = &request.method {
+            return self.handle_deferred_coordination_forward(
+                request.id,
+                params.clone(),
+                respond_to,
+            );
+        }
+        let (params, caller, operation_id) = match request.method {
+            crate::api::schema::Method::AgentPrompt(params) => (params, None, None),
+            crate::api::schema::Method::AgentCoordinationPrompt(params) => {
+                (params.operation, Some(params.caller), None)
+            }
+            crate::api::schema::Method::AgentCoordinationExecute(params) => {
+                let crate::api::schema::AgentCoordinationOperation::Prompt(operation) =
+                    params.operation
+                else {
+                    return false;
+                };
+                (operation, None, Some(params.operation_id))
+            }
+            _ => return false,
         };
         let validated = match self.validate_agent_prompt(request.id, &params) {
             Ok(validated) => validated,
@@ -93,6 +113,64 @@ impl App {
                 let _ = respond_to.send(response);
                 return true;
             }
+        };
+        let operation_lease = if let Some(operation_id) = &operation_id {
+            if operation_id.is_empty() || operation_id.len() > 128 {
+                let _ = respond_to.send(encode_error(
+                    validated.id,
+                    "invalid_request",
+                    "invalid coordination operation ID",
+                ));
+                return true;
+            }
+            let reserved = if self
+                .pending_coordination_launches
+                .values()
+                .any(|pending| pending.id == *operation_id)
+            {
+                Err(())
+            } else {
+                crate::coordination::PromptOperation::reserve(
+                    self.coordination.clone(),
+                    operation_id.clone(),
+                )
+            };
+            match reserved {
+                Ok(lease) => lease,
+                Err(()) => {
+                    let _ = respond_to.send(encode_error(
+                        validated.id,
+                        "coordination_operation_exists",
+                        "inspect the existing operation instead of repeating its input",
+                    ));
+                    return true;
+                }
+            }
+        } else {
+            None
+        };
+        let coordination = if caller.is_some() || operation_id.is_some() {
+            let source = caller.and_then(|caller| self.validate_coordination_caller(&caller).ok());
+            self.coordination_endpoint(&validated.agent)
+                .and_then(|target| {
+                    if source.is_none() && operation_id.is_none() {
+                        return None;
+                    }
+                    let target_alive = self
+                        .state
+                        .terminals
+                        .get(target.terminal_id.as_str())?
+                        .coordination_instance_alive();
+                    Some((
+                        self.coordination.clone(),
+                        operation_id.unwrap_or_else(crate::coordination::new_id),
+                        source,
+                        target,
+                        target_alive,
+                    ))
+                })
+        } else {
+            None
         };
         // Start the completion waiter before submitting, so a refused thread
         // fails the request while nothing has been sent yet.
@@ -103,11 +181,31 @@ impl App {
         )>();
         let waiter_respond_to = respond_to.clone();
         let spawned = crate::thread_spawn::spawn_named("herdr-agent-prompt", move || {
+            let _operation_lease = operation_lease;
             let Ok((id, agent, completion)) = handoff_rx.recv() else {
                 return;
             };
             let response = match completion.recv() {
-                Ok(Ok(())) => encode_success(id, ResponseResult::AgentPrompted { agent }),
+                Ok(Ok(())) => {
+                    if let Some((journal, receipt_id, source, target, alive)) = coordination {
+                        if alive.load(std::sync::atomic::Ordering::Acquire) {
+                            if let Ok(mut journal) = journal.lock() {
+                                if let Err(error) = journal.complete(
+                                    receipt_id,
+                                    crate::api::schema::AgentCoordinationKind::Communication,
+                                    source,
+                                    target,
+                                ) {
+                                    tracing::warn!(
+                                        error,
+                                        "could not persist successful agent communication"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    encode_success(id, ResponseResult::AgentPrompted { agent })
+                }
                 Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
                     encode_error(id, "timeout", err.to_string())
                 }

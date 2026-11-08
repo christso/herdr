@@ -181,12 +181,33 @@ pub(super) fn prompt_agent(
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
+    caller: Option<crate::api::schema::AgentCoordinationEndpoint>,
+    operation_id: Option<String>,
 ) -> std::io::Result<Option<String>> {
+    let observed = |operation| {
+        if let Some(operation_id) = operation_id.clone() {
+            return Method::AgentCoordinationExecute(
+                crate::api::schema::AgentCoordinationExecuteParams {
+                    operation_id,
+                    operation: crate::api::schema::AgentCoordinationOperation::Prompt(operation),
+                },
+            );
+        }
+        match caller.clone() {
+            Some(caller) => {
+                Method::AgentCoordinationPrompt(crate::api::schema::AgentCoordinationPromptParams {
+                    caller,
+                    operation,
+                })
+            }
+            None => Method::AgentPrompt(operation),
+        }
+    };
     let Some(wait) = params.wait.clone() else {
         return Ok(Some(dispatch_to_app_with_timeout(
             Request {
                 id: request_id,
-                method: Method::AgentPrompt(params),
+                method: observed(params),
             },
             api_tx,
             None,
@@ -219,7 +240,7 @@ pub(super) fn prompt_agent(
     let last_event_sequence = event_hub.current_sequence();
     let prompt_request = Request {
         id: request_id.clone(),
-        method: Method::AgentPrompt(params),
+        method: observed(params),
     };
     #[cfg(windows)]
     let prompt_response = dispatch_to_app_with_caller_timeout(

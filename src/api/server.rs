@@ -382,6 +382,40 @@ fn handle_connection_with_stop(
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
     match request.method {
+        Method::AgentCoordinationForward(params) => {
+            #[cfg(unix)]
+            let _agent_lease = if let Some(
+                crate::api::schema::AgentCoordinationSshAgent::Registered { socket_path },
+            ) = &params.ssh_agent
+            {
+                match ssh_agents.ok_or_else(|| io::Error::other("SSH agent registry is unavailable"))
+                    .and_then(|registry| registry.lease_registered(PathBuf::from(socket_path))) {
+                    Ok(lease) => Some(lease),
+                    Err(_) => return write_text_line_allow_disconnect(&mut stream, &error_response_json(request_id, "coordination_forward_not_started", "the requested SSH agent is not actively registered; no operation was submitted".into())),
+                }
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            if matches!(
+                &params.ssh_agent,
+                Some(crate::api::schema::AgentCoordinationSshAgent::Registered { .. })
+            ) {
+                return write_text_line_allow_disconnect(&mut stream, &error_response_json(request_id, "coordination_forward_not_started", "operation-scoped SSH agent registration is unavailable; no operation was submitted".into()));
+            }
+            let response = handle_request(
+                Request {
+                    id: request_id.clone(),
+                    method: Method::AgentCoordinationForward(params),
+                },
+                api_tx,
+                capabilities,
+                server_stop,
+                None,
+                None,
+            );
+            finish_wait_response(&mut stream, Some(response), &request_id, method, changes_ui)
+        }
         #[cfg(unix)]
         Method::ServerSshAgentRegister(params) => {
             let lease = ssh_agents
@@ -458,6 +492,35 @@ fn handle_connection_with_stop(
             )?;
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
+        Method::AgentCoordinationExecute(crate::api::schema::AgentCoordinationExecuteParams {
+            operation_id,
+            operation: crate::api::schema::AgentCoordinationOperation::Prompt(params),
+        }) => {
+            let response = prompt_agent(
+                request_id.clone(),
+                params,
+                &mut stream,
+                api_tx,
+                event_hub,
+                running,
+                None,
+                Some(operation_id),
+            )?;
+            finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
+        }
+        Method::AgentCoordinationPrompt(params) => {
+            let response = prompt_agent(
+                request_id.clone(),
+                params.operation,
+                &mut stream,
+                api_tx,
+                event_hub,
+                running,
+                Some(params.caller),
+                None,
+            )?;
+            finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
+        }
         Method::AgentPrompt(params) => {
             let response = prompt_agent(
                 request_id.clone(),
@@ -466,6 +529,8 @@ fn handle_connection_with_stop(
                 api_tx,
                 event_hub,
                 running,
+                None,
+                None,
             )?;
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }

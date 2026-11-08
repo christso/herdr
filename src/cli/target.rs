@@ -59,6 +59,21 @@ fn usage_error(error: String) -> io::Result<super::CommandOutcome> {
     Ok(super::CommandOutcome::Handled(2))
 }
 
+pub(super) fn coordination_machine() -> Option<crate::api::schema::AgentCoordinationDestination> {
+    TARGET.with(|target| {
+        target.borrow().as_ref().map(|target| {
+            crate::api::schema::AgentCoordinationDestination::SavedMachine {
+                machine: target.profile.id.to_string(),
+                profile_fingerprint: crate::coordination::profile_fingerprint(
+                    target.profile.id.as_str(),
+                    &target.profile.target,
+                    &target.profile.session,
+                ),
+            }
+        })
+    })
+}
+
 pub(super) fn is_remote() -> bool {
     TARGET.with(|target| target.borrow().is_some())
 }

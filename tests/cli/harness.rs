@@ -165,6 +165,15 @@ pub(super) fn spawn_named_server(
     runtime_dir: &Path,
     session: &str,
 ) -> SpawnedServerProcess {
+    spawn_named_server_with_env(config_home, runtime_dir, session, &[])
+}
+
+pub(super) fn spawn_named_server_with_env(
+    config_home: &Path,
+    runtime_dir: &Path,
+    session: &str,
+    envs: &[(&str, &Path)],
+) -> SpawnedServerProcess {
     fs::create_dir_all(config_home.join(app_dir_name())).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
@@ -187,6 +196,9 @@ pub(super) fn spawn_named_server(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
 
     let child = command.spawn().unwrap();
     register_spawned_herdr_pid(Some(child.id()));
@@ -326,6 +338,9 @@ pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    // This helper represents a caller outside a managed agent. Do not inherit
+    // the test runner's real pane as attribution for the isolated server.
+    command.env_remove("HERDR_PANE_ID");
     command.output().unwrap()
 }
 
@@ -338,6 +353,7 @@ pub(super) fn run_cli_in_dir(
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);
+    command.env_remove("HERDR_PANE_ID");
     command.output().unwrap()
 }
 
